@@ -90,7 +90,7 @@ guint n_inst, n_uninst;
 gchar **pinst, **puninst;
 
 char *lang, *lang_loc;
-gboolean needs_reboot, no_update = FALSE, is_pi = TRUE;
+gboolean needs_reboot, first_read, no_update = FALSE, is_pi = TRUE;
 int calls;
 gchar *sel_cat;
 
@@ -107,7 +107,6 @@ static gboolean filter_fn (PkPackage *package, gpointer user_data);
 static void resolve_1_done (PkTask *task, GAsyncResult *res, gpointer data);
 static void update_done (PkTask *task, GAsyncResult *res, gpointer data);
 static void read_data_file (PkTask *task);
-static void reload_data_file (PkTask *task);
 static gboolean match_pid (char *name, const char *pid);
 static gboolean match_arch (char *arch);
 static void resolve_2_done (PkTask *task, GAsyncResult *res, gpointer data);
@@ -330,6 +329,7 @@ static void read_data_file (PkTask *task)
 {
     GtkTreeIter entry, cat_entry;
     GdkPixbuf *icon;
+    GtkIconInfo *iinfo;
     GKeyFile *kf;
     gchar **groups, **pnames;
     gchar *buf, *cat, *name, *desc, *iname, *loc, *pack, *rpack, *adds, *add, *addspl, *arch;
@@ -347,10 +347,13 @@ static void read_data_file (PkTask *task)
         g_key_file_load_from_file (kf, PACKAGE_DATA_DIR "/prefapps.conf", G_KEY_FILE_NONE, NULL))
     {
         g_free (buf);
-        gtk_list_store_append (GTK_LIST_STORE (categories), &cat_entry);
-        icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), "rpi", 32, 0, NULL);
-        gtk_list_store_set (categories, &cat_entry, CAT_ICON, icon, CAT_NAME, "All Programs", CAT_DISP_NAME, _("All Programs"), -1);
-        if (icon) g_object_unref (icon);
+        if (first_read)
+        {
+            gtk_list_store_append (GTK_LIST_STORE (categories), &cat_entry);
+            icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), "rpi", 32, 0, NULL);
+            gtk_list_store_set (categories, &cat_entry, CAT_ICON, icon, CAT_NAME, "All Programs", CAT_DISP_NAME, _("All Programs"), -1);
+            if (icon) g_object_unref (icon);
+        }
         groups = g_key_file_get_groups (kf, NULL);
 
         while (groups[gcount])
@@ -405,160 +408,47 @@ static void read_data_file (PkTask *task)
             }
 
             // add unique entries to category list
-            new = TRUE;
-            gtk_tree_model_get_iter_first (GTK_TREE_MODEL (categories), &cat_entry);
-            while (gtk_tree_model_iter_next (GTK_TREE_MODEL (categories), &cat_entry))
+            if (first_read)
             {
-                gtk_tree_model_get (GTK_TREE_MODEL (categories), &cat_entry, CAT_NAME, &buf, -1);
-                if (!g_strcmp0 (cat, buf))
+                new = TRUE;
+                gtk_tree_model_get_iter_first (GTK_TREE_MODEL (categories), &cat_entry);
+                while (gtk_tree_model_iter_next (GTK_TREE_MODEL (categories), &cat_entry))
                 {
-                    new = FALSE;
+                    gtk_tree_model_get (GTK_TREE_MODEL (categories), &cat_entry, CAT_NAME, &buf, -1);
+                    if (!g_strcmp0 (cat, buf))
+                    {
+                        new = FALSE;
+                        g_free (buf);
+                        break;
+                    }
                     g_free (buf);
-                    break;
                 }
-                g_free (buf);
-            } 
 
-            if (new)
-            {
-                icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), cat_icon_name (cat), 32, 0, NULL);
-                gtk_list_store_append (categories, &cat_entry);
-                gtk_list_store_set (categories, &cat_entry, CAT_ICON, icon, CAT_NAME, cat, CAT_DISP_NAME, _(cat), -1);
-                if (icon) g_object_unref (icon);
-            }
-
-            // create the entry for the packages list
-            icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), iname, 32, 0, NULL);
-            if (!icon) icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), "application-x-executable", 32, 0, NULL);
-            gtk_list_store_append (packages, &entry);
-            buf = g_strdup_printf (_("<b>%s</b>\n%s"), name, desc);
-            gtk_list_store_set (packages, &entry,
-                PACK_ICON, icon,
-                PACK_CELL_TEXT, buf,
-                PACK_INSTALLED, FALSE,
-                PACK_INIT_INST, FALSE,
-                PACK_CATEGORY, cat,
-                PACK_PACKAGE_NAME, pack,
-                PACK_PACKAGE_ID, "none",
-                PACK_RPACKAGE_NAME, rpack,
-                PACK_RPACKAGE_ID, "none",
-                PACK_CELL_NAME, name,
-                PACK_CELL_DESC, desc,
-                PACK_ADD_NAMES, adds,
-                PACK_ADD_IDS, "none",
-                PACK_REBOOT, reboot,
-                PACK_ARCH, arch ? arch : "any",
-                PACK_RPDESC, rpdesc,
-                -1);
-            if (icon) g_object_unref (icon);
-
-            g_free (buf);
-            g_free (cat);
-            g_free (name);
-            g_free (desc);
-            g_free (iname);
-            g_free (pack);
-            g_free (rpack);
-            g_free (adds);
-            g_free (arch);
-
-            gcount++;
-        }
-        g_free (groups);
-    }
-    else
-    {
-        // handle no data file here...
-        g_free (buf);
-        g_free (pnames);
-        error_box (_("Unable to open package data file"), TRUE);
-        return;
-    }
-
-    message (_("Finding packages - please wait..."), 0 , -1);
-
-    pk_client_resolve_async (PK_CLIENT (task), 0, pnames, NULL, (PkProgressCallback) progress, NULL, (GAsyncReadyCallback) resolve_2_done, NULL);
-    g_free (pnames);
-}
-
-
-static void reload_data_file (PkTask *task)
-{
-    GtkTreeIter entry, cat_entry;
-    GdkPixbuf *icon;
-    GKeyFile *kf;
-    gchar **groups, **pnames;
-    gchar *buf, *cat, *name, *desc, *iname, *loc, *pack, *rpack, *adds, *add, *addspl, *arch;
-    gboolean new, reboot, rpdesc;
-    int pcount = 0, gcount = 0;
-
-    loc = setlocale (0, "");
-    strtok (loc, "_. ");
-    buf = g_strdup_printf ("%s/prefapps_%s.conf", PACKAGE_DATA_DIR, loc);
-
-    pnames = malloc (sizeof (gchar *));
-
-    kf = g_key_file_new ();
-    if (g_key_file_load_from_file (kf, buf, G_KEY_FILE_NONE, NULL) ||
-        g_key_file_load_from_file (kf, PACKAGE_DATA_DIR "/prefapps.conf", G_KEY_FILE_NONE, NULL))
-    {
-        g_free (buf);
-        groups = g_key_file_get_groups (kf, NULL);
-
-        while (groups[gcount])
-        {
-            cat = g_key_file_get_value (kf, groups[gcount], "category", NULL);
-            name = g_key_file_get_value (kf, groups[gcount], "name", NULL);
-            desc = g_key_file_get_value (kf, groups[gcount], "description", NULL);
-            iname = g_key_file_get_value (kf, groups[gcount], "icon", NULL);
-            pack = g_key_file_get_value (kf, groups[gcount], "package", NULL);
-            rpack = g_key_file_get_value (kf, groups[gcount], "rpackage", NULL);
-            adds = g_key_file_get_value (kf, groups[gcount], "additional", NULL);
-            reboot = g_key_file_get_boolean (kf, groups[gcount], "reboot", NULL);
-            arch = g_key_file_get_value (kf, groups[gcount], "arch", NULL);
-            rpdesc = g_key_file_get_boolean (kf, groups[gcount], "rpdesc", NULL);
-
-            // create array of package names
-            pnames = realloc (pnames, (pcount + 1 + (rpack ? 2 : 1)) * sizeof (gchar *));
-            pnames[pcount++] = g_strdup (pack);
-            if (rpack) pnames[pcount++] = g_strdup (rpack);
-            pnames[pcount] = NULL;
-
-            // add additional packages to array of names
-            if (adds && *adds)
-            {
-                // additional packages separated by commas
-                addspl = g_strdup (adds);
-                add = strtok (addspl, ",");
-                while (add)
+                if (new)
                 {
-                    if (strchr (add, '%'))
-                    {
-                        // substitute %s with locale strings
-                        if (*lang)
-                        {
-                            pnames = realloc (pnames, (pcount + 2) * sizeof (gchar *));
-                            pnames[pcount++] = g_strdup_printf (add, lang);
-                        }
-                        if (*lang_loc)
-                        {
-                            pnames = realloc (pnames, (pcount + 2) * sizeof (gchar *));
-                            pnames[pcount++] = g_strdup_printf (add, lang_loc);
-                        }
-                    }
-                    else
-                    {
-                        pnames = realloc (pnames, (pcount + 2) * sizeof (gchar *));
-                        pnames[pcount++] = g_strdup (add);
-                    }
-                    add = strtok (NULL, ",");
+                    icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), cat_icon_name (cat), 32, 0, NULL);
+                    gtk_list_store_append (categories, &cat_entry);
+                    gtk_list_store_set (categories, &cat_entry, CAT_ICON, icon, CAT_NAME, cat, CAT_DISP_NAME, _(cat), -1);
+                    if (icon) g_object_unref (icon);
                 }
-                g_free (addspl);
             }
 
             // create the entry for the packages list
-            icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), iname, 32, 0, NULL);
-            if (!icon) icon = gtk_icon_theme_load_icon (gtk_icon_theme_get_default (), "application-x-executable", 32, 0, NULL);
+            iinfo = gtk_icon_theme_lookup_icon (gtk_icon_theme_get_default (), iname, 32, GTK_ICON_LOOKUP_FORCE_SIZE);
+            if (iinfo)
+            {
+                icon = gtk_icon_info_load_icon (iinfo, NULL);
+                g_object_unref (iinfo);
+            }
+            if (!icon)
+            {
+                iinfo = gtk_icon_theme_lookup_icon (gtk_icon_theme_get_default (), "application-x-executable", 32, GTK_ICON_LOOKUP_FORCE_SIZE);
+                if (iinfo)
+                {
+                    icon = gtk_icon_info_load_icon (iinfo, NULL);
+                    g_object_unref (iinfo);
+                }
+            }
             gtk_list_store_append (packages, &entry);
             buf = g_strdup_printf (_("<b>%s</b>\n%s"), name, desc);
             gtk_list_store_set (packages, &entry,
@@ -1264,7 +1154,8 @@ static gboolean reload (GtkButton *button, gpointer data)
     gtk_list_store_clear (packages);
     gtk_tree_model_filter_refilter (GTK_TREE_MODEL_FILTER (gtk_tree_view_get_model (GTK_TREE_VIEW (pack_tv))));
     task = pk_task_new ();
-    reload_data_file (task);
+    first_read = FALSE;
+    read_data_file (task);
     return FALSE;
 }
 
@@ -1299,33 +1190,17 @@ static void error_box (char *msg, gboolean terminal)
     if (!err_dlg)
     {
         GtkBuilder *builder;
-        GtkWidget *wid;
-        GdkColor col;
 
-        builder = gtk_builder_new ();
-        gtk_builder_add_from_file (builder, PACKAGE_DATA_DIR "/rp_prefapps.ui", NULL);
+        builder = gtk_builder_new_from_file (PACKAGE_DATA_DIR "/rp_prefapps.ui");
 
         err_dlg = (GtkWidget *) gtk_builder_get_object (builder, "error");
-        gtk_window_set_modal (GTK_WINDOW (err_dlg), TRUE);
         gtk_window_set_transient_for (GTK_WINDOW (err_dlg), GTK_WINDOW (main_dlg));
-        gtk_window_set_position (GTK_WINDOW (err_dlg), GTK_WIN_POS_CENTER_ON_PARENT);
-        gtk_window_set_destroy_with_parent (GTK_WINDOW (err_dlg), TRUE);
-        gtk_window_set_default_size (GTK_WINDOW (err_dlg), 400, 200);
-
-        gdk_color_parse ("#FFFFFF", &col);
-        wid = (GtkWidget *) gtk_builder_get_object (builder, "err_eb");
-        gtk_widget_modify_bg (wid, GTK_STATE_NORMAL, &col);
-        wid = (GtkWidget *) gtk_builder_get_object (builder, "err_sw");
-        gtk_widget_modify_bg (wid, GTK_STATE_NORMAL, &col);
-        wid = (GtkWidget *) gtk_builder_get_object (builder, "err_vp");
-        gtk_widget_modify_bg (wid, GTK_STATE_NORMAL, &col);
 
         err_msg = (GtkWidget *) gtk_builder_get_object (builder, "err_lbl");
         err_btn = (GtkWidget *) gtk_builder_get_object (builder, "err_btn");
 
         gtk_label_set_text (GTK_LABEL (err_msg), msg);
 
-        gtk_button_set_label (GTK_BUTTON (err_btn), "_OK");
         if (terminal)
             g_signal_connect (err_btn, "clicked", G_CALLBACK (quit), (void *) 0);
         else
@@ -1350,58 +1225,46 @@ static void message (char *msg, int wait, int prog)
     if (!msg_dlg)
     {
         GtkBuilder *builder;
-        GtkWidget *wid;
-        GdkColor col;
 
-        builder = gtk_builder_new ();
-        gtk_builder_add_from_file (builder, PACKAGE_DATA_DIR "/rp_prefapps.ui", NULL);
+        builder = gtk_builder_new_from_file (PACKAGE_DATA_DIR "/rp_prefapps.ui");
 
-        msg_dlg = (GtkWidget *) gtk_builder_get_object (builder, "msg");
-        gtk_window_set_modal (GTK_WINDOW (msg_dlg), TRUE);
+        msg_dlg = (GtkWidget *) gtk_builder_get_object (builder, "modal");
         gtk_window_set_transient_for (GTK_WINDOW (msg_dlg), GTK_WINDOW (main_dlg));
-        gtk_window_set_position (GTK_WINDOW (msg_dlg), GTK_WIN_POS_CENTER_ON_PARENT);
-        gtk_window_set_destroy_with_parent (GTK_WINDOW (msg_dlg), TRUE);
-        gtk_window_set_default_size (GTK_WINDOW (msg_dlg), 340, 100);
 
-        wid = (GtkWidget *) gtk_builder_get_object (builder, "msg_eb");
-        gdk_color_parse ("#FFFFFF", &col);
-        gtk_widget_modify_bg (wid, GTK_STATE_NORMAL, &col);
-
-        msg_msg = (GtkWidget *) gtk_builder_get_object (builder, "msg_lbl");
-        msg_pb = (GtkWidget *) gtk_builder_get_object (builder, "msg_pb");
-        msg_btn = (GtkWidget *) gtk_builder_get_object (builder, "msg_btn");
-        msg_cancel = (GtkWidget *) gtk_builder_get_object (builder, "msg_cancel");
+        msg_msg = (GtkWidget *) gtk_builder_get_object (builder, "modal_msg");
+        msg_pb = (GtkWidget *) gtk_builder_get_object (builder, "modal_pb");
+        msg_btn = (GtkWidget *) gtk_builder_get_object (builder, "modal_ok");
+        msg_cancel = (GtkWidget *) gtk_builder_get_object (builder, "modal_cancel");
 
         gtk_label_set_text (GTK_LABEL (msg_msg), msg);
 
-        gtk_widget_show_all (msg_dlg);
         g_object_unref (builder);
     }
     else gtk_label_set_text (GTK_LABEL (msg_msg), msg);
 
     if (wait)
     {
-        gtk_widget_set_visible (msg_pb, FALSE);
+        gtk_widget_hide (msg_pb);
         if (wait > 1)
         {
             gtk_button_set_label (GTK_BUTTON (msg_btn), "_Yes");
+            gtk_button_set_label (GTK_BUTTON (msg_cancel), "_No");
             g_signal_connect (msg_btn, "clicked", G_CALLBACK (quit), (void *) 1);
             g_signal_connect (msg_cancel, "clicked", G_CALLBACK (quit), (void *) 0);
-            gtk_widget_set_visible (msg_cancel, TRUE);
+            gtk_widget_show (msg_cancel);
         }
         else
         {
-            gtk_button_set_label (GTK_BUTTON (msg_btn), "_OK");
             g_signal_connect (msg_btn, "clicked", G_CALLBACK (reload), NULL);
-            gtk_widget_set_visible (msg_cancel, FALSE);
+            gtk_widget_hide (msg_cancel);
         }
-        gtk_widget_set_visible (msg_btn, TRUE);
+        gtk_widget_show (msg_btn);
     }
     else
     {
-        gtk_widget_set_visible (msg_cancel, FALSE);
-        gtk_widget_set_visible (msg_btn, FALSE);
-        gtk_widget_set_visible (msg_pb, TRUE);
+        gtk_widget_hide (msg_cancel);
+        gtk_widget_hide (msg_btn);
+        gtk_widget_show (msg_pb);
         if (prog == -1) gtk_progress_bar_pulse (GTK_PROGRESS_BAR (msg_pb));
         else
         {
@@ -1409,7 +1272,9 @@ static void message (char *msg, int wait, int prog)
             gtk_progress_bar_set_fraction (GTK_PROGRESS_BAR (msg_pb), progress);
         }
     }
+    gtk_widget_show (msg_dlg);
 }
+
 
 /*----------------------------------------------------------------------------*/
 /* Handlers for main window user interaction                                  */
@@ -1524,9 +1389,9 @@ int main (int argc, char *argv[])
 
 #ifdef ENABLE_NLS
     setlocale (LC_ALL, "");
-    bindtextdomain ( GETTEXT_PACKAGE, PACKAGE_LOCALE_DIR );
-    bind_textdomain_codeset ( GETTEXT_PACKAGE, "UTF-8" );
-    textdomain ( GETTEXT_PACKAGE );
+    bindtextdomain (GETTEXT_PACKAGE, PACKAGE_LOCALE_DIR);
+    bind_textdomain_codeset (GETTEXT_PACKAGE, "UTF-8");
+    textdomain (GETTEXT_PACKAGE);
 #endif
 
     if (system ("raspi-config nonint is_pi")) is_pi = FALSE;
@@ -1535,14 +1400,11 @@ int main (int argc, char *argv[])
     needs_reboot = FALSE;
 
     // GTK setup
-    gdk_threads_init ();
-    gdk_threads_enter ();
     gtk_init (&argc, &argv);
     gtk_icon_theme_prepend_search_path (gtk_icon_theme_get_default(), PACKAGE_DATA_DIR);
 
     // build the UI
-    builder = gtk_builder_new ();
-    gtk_builder_add_from_file (builder, PACKAGE_DATA_DIR "/rp_prefapps.ui", NULL);
+    builder = gtk_builder_new_from_file (PACKAGE_DATA_DIR "/rp_prefapps.ui");
 
     main_dlg = (GtkWidget *) gtk_builder_get_object (builder, "main_window");
     cat_tv = (GtkWidget *) gtk_builder_get_object (builder, "treeview_cat");
@@ -1596,6 +1458,7 @@ int main (int argc, char *argv[])
 
     // update application, load the data file and check with backend
     if (argc > 1 && !g_strcmp0 (argv[1], "noupdate")) no_update = TRUE;
+    first_read = TRUE;
 
     if (net_available ())
     {
@@ -1615,7 +1478,6 @@ int main (int argc, char *argv[])
 
     g_object_unref (builder);
     gtk_widget_destroy (main_dlg);
-    gdk_threads_leave ();
     return 0;
 }
 
